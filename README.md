@@ -1,6 +1,6 @@
 # ccp
 
-A Common Combinator Parser library for Clojure
+Clojure Combinator Parser library
 
 ## Usage
 
