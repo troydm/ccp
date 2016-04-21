@@ -1,6 +1,6 @@
 # ccp
 
-Clojure Combinator Parser library
+Clojure Combinatoric Parsing library
 
 ## Usage
 
