@@ -1,4 +1,4 @@
-# ccp
+# ccp [![Build Status](https://travis-ci.org/troydm/ccp.svg?branch=master)](https://travis-ci.org/troydm/ccp)
 
 Clojure Combinatoric Parsing library
 
