@@ -20,6 +20,8 @@
   (state-changed? [ps st])
   (start-state? [ps])
   (end-state? [ps])
+  (get-user-state [ps])
+  (set-user-state [ps nu])
   (describe-error [ps pe]))
 
 (deftype ParserError [ps state msg]
@@ -40,14 +42,26 @@
   "find out line/column at position p in String s"
   [s p]
   (let [len (.length s)]
-    (loop [p p l 1 c 1]
-      (if (<= p 0)
-        `(~l ~c)
-        (if (>= p len)
-          `(~l ~(+ p c))
-          (if (= (.charAt s p) \newline)
-            (recur (- p 1) (+ l 1) 1)
-            (recur (- p 1) l (+ c 1))))))))
+    (loop [i 0 l 1 c 1]
+          (if (>= i p)
+            `(~l ~c)
+        (if (= i len)
+          `(~l ~(+ c (- p i)))
+          (cond 
+            (= (.charAt s i) \newline)
+            (if (= p i) 
+              `(~l ~(inc c)) 
+              (recur (inc i) (inc l) 1))
+            (= (.charAt s i) \return)
+            (if (= p i) 
+              `(~l ~(inc c)) 
+              (if (and (< (inc i) len) (= (.charAt s (inc i)) \newline))
+                (if (= p (inc i)) `(~l ~c) (recur (inc (inc i)) (inc l) 1))
+                (recur (inc i) (inc l) 1)))
+            :else
+            (recur (inc i) l (inc c))
+            ))))))
+    
 
 (deftype StringParseStreamCharSequence [ps p l]
   CharSequence
@@ -60,7 +74,7 @@
   (subSequence [_ s e] (StringParseStreamCharSequence. ps (+ p s) (- e s)))
   (toString [_] (.substring (.s ps) p (+ p l))))
 
-(deftype StringParseStream [^:unsynchronized-mutable p s]
+(deftype StringParseStream [^:unsynchronized-mutable p s ^:unsynchronized-mutable u]
   ParseStream
   (reset [ps] (set! p -1))
   (current-elem [ps] (if (or (start-state? ps) (end-state? ps)) nil (.charAt s p)))
@@ -75,6 +89,8 @@
   (state-changed? [ps st] (not= st p))
   (start-state? [ps] (= -1 p))
   (end-state? [ps] (= p (.length s)))
+  (get-user-state [ps] u)
+  (set-user-state [ps nu] (set! u nu))
   (describe-error [ps pe]
     (let [[l c] (line-col s (parser-error-state pe))]
     (str "expecting " (parser-error-message pe) " on line " l " col " c)))
@@ -83,7 +99,7 @@
     [ps] 
     (StringParseStreamCharSequence. ps (get-state ps) (- (.length (.s ps)) (get-state ps)))))
 
-(deftype SequenceParseStream [^:unsynchronized-mutable p s]
+(deftype SequenceParseStream [^:unsynchronized-mutable p s ^:unsynchronized-mutable u]
   ParseStream
   (reset [ps] (set! p -1))
   (current-elem [ps] (if (or (start-state? ps) (end-state? ps)) nil (nth s p)))
@@ -98,33 +114,43 @@
   (state-changed? [ps st] (not= st p))
   (start-state? [ps] (= -1 p))
   (end-state? [ps] (= p (count s)))
+  (get-user-state [ps] u)
+  (set-user-state [ps nu] (set! u nu))
   (describe-error [ps pe]
     (let [p (parser-error-state pe)]
     (str "expecting " (parser-error-message pe) " on index " p " in sequence, but got: " (nth s p)))))
 
 (extend-type String
     ParseStreamFactory
-    (parse-stream [d] (StringParseStream. -1 d)))
+    (parse-stream [d] (StringParseStream. -1 d nil)))
 
 (extend-type java.util.List
     ParseStreamFactory
-    (parse-stream [d] (SequenceParseStream. -1 d)))
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
 
 (extend-type clojure.lang.PersistentVector
     ParseStreamFactory
-    (parse-stream [d] (SequenceParseStream. -1 d)))
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
 
 (extend-type clojure.lang.PersistentVector$TransientVector
     ParseStreamFactory
-    (parse-stream [d] (SequenceParseStream. -1 d)))
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
 
 (extend-type clojure.lang.PersistentList
     ParseStreamFactory
-    (parse-stream [d] (SequenceParseStream. -1 d)))
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
 
 (extend-type clojure.lang.PersistentList$EmptyList
     ParseStreamFactory
-    (parse-stream [d] (SequenceParseStream. -1 d)))
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
+
+(extend-type clojure.lang.PersistentHashSet
+    ParseStreamFactory
+    (parse-stream [d] (SequenceParseStream. -1 d nil)))
+
+(extend-type clojure.lang.PersistentArrayMap
+    ParseStreamFactory
+    (parse-stream [d] (SequenceParseStream. -1 (seq d) nil)))
 
 ;; this empty stream is used by few parsers
 (def empty-stream (parse-stream ""))
@@ -134,7 +160,6 @@
   "return number of arguments function can take"
   [f]
   (-> f class .getDeclaredMethods first .getParameterTypes alength))
-
 
 (defn rewind
   "try parsing p and restore stream state on failure"
@@ -159,6 +184,20 @@
   "try parsing p and on success return nil"
   [p]
   (return p nil))
+
+(def user-state
+  "get current parse stream user state"
+  (fn [ps] (get-user-state ps)))
+
+(defn set-user-state!
+  "set current parse stream user state"
+  [s]
+  (fn [ps] (set-user-state ps s)))
+
+(defn modify-user-state!
+  "apply function to current parse stream user state"
+  [f]
+  (fn [ps] (set-user-state ps (f (get-user-state ps)))))
 
 (defmacro defer
   "if p is not defined yet, return a lazy parser instead, used for forward declarations"
@@ -243,7 +282,7 @@
   (rewind (satisfy char? "any character")))
 
 (def bol
-  "expect beginning of line, returns nil on success"
+  "expect beginning of line, returns nil"
   (fn [ps]
       (if (start-state? ps) 
         nil
@@ -253,7 +292,7 @@
             (parser-error ps "beginning of line"))))))
   
 (def eol
-  "expect end of line, supports windows, unix and mac newline types"
+  "expect end of line, supports windows, unix and mac newline types, returns \newline"
   (rewind 
     (fn [ps]
         (let [e (next-elem ps)]
@@ -274,7 +313,7 @@
 
 (def eos
   "expect end of stream"
-  (rewind (satisfy (fn [_ ps] end-state? ps) "end of stream")))
+  (fn [ps] (if (end-state? ps) nil (parser-error ps "end of stream"))))
 
 (def any-elem
   "expect any element"
@@ -612,12 +651,12 @@
       (let [e (p ps)]
         (if (parser-error? e)
           e
-          (loop [e (end ps) acc (transient [e])]
+          (loop [acc (transient [e]) e (end ps)]
                 (if (parser-error? e)
                   (let [e2 (p ps)]
                     (if (parser-error? e2)
                       e
-                      (recur (end ps) (conj! acc e2))))
+                      (recur (conj! acc e2) (end ps))))
                   (persistent! acc)))))))
 
 (defn atleast
@@ -687,7 +726,7 @@
                       (recur (p ps) (conj! acc e))
                       (persistent! (conj! acc e)))))))
 
-(defn separated?
+(defn separated!
   "parse p's seperated by s, allows ending s without following p"
   [p s]
   (fn [ps]
